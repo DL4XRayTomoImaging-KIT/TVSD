@@ -1,0 +1,398 @@
+from torch.utils.data import Dataset
+import tifffile
+from medpy.io import load as medload
+import skimage.transform
+from albumentations.augmentations.transforms import CropNonEmptyMaskIfExists, RandomCrop
+from albumentations import Compose as AlbuCompose
+from albumentations import BboxParams
+import numpy as np
+from copy import deepcopy
+from skimage.measure import label as find_connected_regions
+
+def convert_id_to_3d(id, shapes):
+    """
+    Converts linear id to the slice taken across one of the axes.
+    """
+    if id < shapes[0]:
+        internal_ax = 0
+        internal_id = id
+    elif id < shapes[0] + shapes[1]:
+        internal_ax = 1
+        internal_id = id - shapes[0]
+    else:
+        internal_ax = 2
+        internal_id = id - (shapes[0] + shapes[1])
+
+    return internal_ax, internal_id
+
+internal_medload = lambda addr: np.swapaxes(medload(addr)[0], 0, -1)
+
+class ExpandedPaddedSegmentation:
+    """
+    Could be used to hold only RoI in memory, instead of the whole array.
+    Args:
+        data: np.array with markup itself.
+        original_shape: tuple of the shapes of the image to be matched with segmentation.
+        If left unattended, this class almost replicate the simple np.array with some tweaks for indexing and checking markup.
+        boundaries: list of tuples to indicate to which region in original volume RoI patch belongs.
+        mode_3d: bool indicator of supporting linear slicing from axes other then 0.
+    """
+    def __init__(self, data, original_shape=None, boundaries=None, mode_3d=False):
+        if isinstance(data, str):
+            data = internal_medload(data)
+
+        if original_shape is None:
+            self.is_expanded = False
+
+            self.original_shape = data.shape
+            self.boundaries = []
+            for ax in range(len(data.shape)):
+                axes_to_sum = tuple([i for i in range(len(data.shape)) if i!=ax])
+                is_zero_along_axis = ((data > 0).sum(axes_to_sum))
+                f,t = np.where(is_zero_along_axis)[0][[0, -1]]
+                self.boundaries.append((f, t))
+
+            self.data = data
+        else:
+            self.is_expanded = True
+
+            self.original_shape = original_shape
+            self.boundaries = boundaries
+
+            shapes_original = original_shape if boundaries is None else map(lambda p: p[1]-p[0], boundaries)
+            self.data = skimage.transform.resize(data, shapes_original, order=0, preserve_range=True)
+
+        self.len = sum(self.original_shape) if mode_3d else self.original_shape[0]
+
+    def __len__(self):
+        return self.len
+
+    def _is_empty(self, id, axis=None):
+        if axies is None:
+            axis, id = convert_id_to_3d(id, self.original_shape)
+        if (id < self.braces[axis][0]) or (id >= self.braces[axis][1]):
+            return True
+        else:
+            return False
+
+    def _expand_markup(self, axis, id):
+        if self.is_expanded:
+            new_shape = [s for i,s in enumerate(self.original_shape) if i != axis]
+            new_image = np.zeros(tuple(new_shape))
+
+            if self._is_empty(id):
+                return new_image
+
+            new_patch_position = tuple([slice(*s) for i,s in enumerate(self.boundaries) if i!= axis])
+            markup_patch = self.data.take(id - self.boundaries[axis][0], axis)
+
+            new_image[new_patch_position] = markup_patch
+        else:
+            new_image = self.data.take(id, axis)
+
+        return new_image
+
+    def __getitem__(self, id):
+        internal_ax, internal_id = convert_id_to_3d(id, self.original_shape)
+        return self._expand_markup(internal_ax, internal_id)
+
+
+class ConvertableBoundingBoxes:
+    def __init__(self, bboxes, shapes, coord_format='int'):
+        self.bboxes = bboxes
+        self.shapes = shapes
+
+    def _convert_int_to_format(self, bbox, coord_format):
+        if coord_format == 'int':
+            return bbox
+
+        bbox_pascal = [((bb[1][0], bb[0][0], bb[1][1], bb[0][1]), c) for bb,c in bbox]
+
+        if coord_format == 'pascal_voc':
+            return bbox_pascal
+        else:
+            raise NotImplementedError('Conversion to other formats of coordinates is not implemented yet!')
+
+    @classmethod
+    def from_segmentation(cls, segmentation):
+        bboxes = []
+        for lbl in np.unique(segmentation):
+            if lbl == 0:
+                continue # background label. Probably should be more flexible on background selection.
+
+            sub_label = (segmentation == lbl)
+            # generate separate bounding boxes for each isolated area
+            connected_components = find_connected_regions(sub_label)
+            for region_id in np.unique(connected_components)[1:]:
+                current_bbox = []
+                region = (connected_components == region_id)
+                for ax in (0, 1, 2):
+                    axes_to_sum = tuple([i for i in (0, 1, 2) if i!= ax])
+                    current_bbox.append(np.where(region.sum(axes_to_sum) > 0)[0][[0, -1]])
+                bboxes.append((current_bbox, lbl))
+        #TODO: apply NMS of some kind
+        return cls(bboxes, segmentation.shape)
+
+    def __getitem__(self, id, return_format='pascal_voc'):
+        internal_ax, internal_id = convert_id_to_3d(id, self.shapes)
+        bboxes_2d = []
+        for bb, i in self.bboxes:
+            if (internal_id >= bb[internal_ax][0]) and (internal_id < bb[internal_ax][1]):
+                bboxes_2d.append(([boundaries for j, boundaries in enumerate(bb) if j != internal_ax], i))
+
+        if len(bboxes_2d) > 0:
+            return self._convert_int_to_format(bboxes_2d, return_format)
+        else:
+            return None
+
+
+class OneVolume:
+    """
+    Class to wrap around different types of volumetric data to be processed.
+    Args:
+        data: string or np.array with address of the data or data itself respectively
+        use_ram: bool if set to false while using tiff format will not load whole volume to ram, will directly read slices from drive.
+        pixel_transform: callable for pixel-wise transformation, e.g. to cast to another type or scale-shift values
+    """
+    def __init__(self, data, mode_3d=False, use_ram=False, pixel_transform=None):
+        self.is_memmapped = False
+        if isinstance(data, str):
+            if data.endswith('.tif') or data.endswith('.tiff'):
+                if not use_ram:
+                    self.file_addr = data
+                    self.is_memmapped = True
+                    self.shapes = tifffile.memmap(self.file_addr).shape
+                else:
+                    self.image = tifffile.imread(data)
+            else:
+                self.image = internal_medload(data)
+        else:
+            self.image = data
+
+        if not self.is_memmapped:
+            self.shapes = self.image.shape
+
+        self.mode_3d = mode_3d
+        if mode_3d:
+            self.len = sum(self.shapes)
+        else:
+            self.len = self.shapes[0]
+
+        if self.is_memmapped:
+            self.pixel_transform = pixel_transform
+        else:
+            if pixel_transform is not None:
+                self.image = pixel_transform(self.image)
+
+    def __len__(self):
+        return self.len
+
+    def __getitem__(self, id):
+        internal_ax, internal_id = convert_id_to_3d(id, self.shapes)
+
+        img = tifffile.memmap(self.file_addr) if self.is_memmapped else self.image
+        slc = img.take(internal_id, internal_ax)
+
+        if self.is_memmapped and (self.pixel_transform is not None):
+            slc = self.pixel_transform(slc)
+
+        return slc
+
+
+class VolumeSlicingDataset(Dataset):
+    """
+    Dataset class which works for all possible cases: 2d and 3d classification, segmentation and localisation.
+    It allows both slicing from the 0 axis and from all axes.
+
+    Args:
+        volume: [np.array, str, OneVolume] is the image itself. If array or string is passed will be converted to the OneVolume with usage of one_volume_kwargs param.
+        one_volume_kwargs: [dict] is the parameters to convert address or np.array to the OneVolume
+        mode_3d: [bool] if set to True will override this parameter for both volume and segmentation. Will allow slicing along all different axes, not only 0 axis will be sliced.
+        augmentations: [albumentations.Compose] -- set of albumentation augmentations, will be applied for all available targets.
+        crop_size: [int, tuple(int)] size of the image crop to be done from each slice. If one int passed will be square crop.
+        localised_crop: [bool] if True, will localise the crop around the segmentation labels/bounding box if available on current slice.
+        class_label_3d: single or tuple of values to be returned universally for each slice taken from this volume.
+        class_label_2d: [np.array, list] classes for each possible slice (either of length volume.shape[0] or sum(volume.shape) if mode_3d is True), to be returned for slices specifically.
+        bounding_box: list(tuple(list(tuple), int)) -- 3D bounding boxes list. Each bounding box in list should be pair of list of coordinates of start and end across each axis and class.
+        segmentation:[np.array, str, ExpandedPaddedSegmentation] -- either address, volume or special class of segmentation. If address or volume passed, will be converted to the ExpandedPaddedSegmentation.
+        expanded_padded_markup_kwargs: [dict] -- paramters to convert volume or address of segmentation masks to the ExpandedPaddedMarkup.
+        task: [str] -- either 'auto', which means everything passed to the class will be returned, or possible tasks from list of 'bbox,segmentation,class_2d,class_3d' separated by comma.
+            Some conversions are possible. if bounding boxes or segmentation masks are provided, labels for 2d classification would be generated. If segmentation is provided, bounding_boxes will be generated.
+    """
+    def __init__(self, volume, one_volume_kwargs=None, mode_3d=False,
+                 augmentations=None,
+                 crop_size=None, localised_crop=False,
+                 class_label_3d=None, class_label_2d=None, bounding_box=None,
+                 segmentation=None, expanded_padded_markup_kwargs=None, task='auto'):
+
+        if isinstance(volume, OneVolume):
+            self.volume = volume
+        else:
+            if one_volume_kwargs is None:
+                one_volume_kwargs = {}
+            if mode_3d:
+                one_volume_kwargs['mode_3d'] = True
+            self.volume = OneVolume(volume, **one_volume_kwargs)
+
+        if isinstance(crop_size, int):
+            crop_size = (crop_size, crop_size)
+
+        if crop_size is not None:
+            if localised_crop:
+                self.cropper = AlbuCompose([CropNonEmptyMaskIfExists(*crop_size, always_apply=True)], bbox_params=BboxParams('pascal_voc', label_fields=['bbox_labels']))
+            else:
+                self.cropper = AlbuCompose([RandomCrop(*crop_size, always_apply=True)], bbox_params=BboxParams('pascal_voc', label_fields=['bbox_labels']))
+        else:
+            self.cropper = None
+
+        self.augmentations = augmentations
+
+        self.class_label_2d = None
+        self.class_label_3d = None
+        self.bounding_box = None
+        self.segmentation = None
+        self.values_to_return = []
+
+        if class_label_2d is not None:
+            self.class_label_2d = class_label_2d
+            if task == 'auto':
+                self.values_to_return.append('class_2d')
+
+        if class_label_3d is not None:
+            self.class_label_3d = class_label_3d
+            if task == 'auto':
+                self.values_to_return.append('class_3d')
+
+        if bounding_box is not None:
+            self.bounding_box = ConvertableBoundingBoxes(bounding_box, self.volume.shapes)
+            if task == 'auto':
+                self.values_to_return.append('bbox')
+
+        if segmentation is not None:
+            if isinstance(segmentation, ExpandedPaddedSegmentation):
+                self.segmentation = segmentation
+            else:
+                if expanded_padded_markup_kwargs is None:
+                    expanded_padded_markup_kwargs = {}
+                if mode_3d:
+                    expanded_padded_markup_kwargs['mode_3d'] = True
+                self.segmentation = ExpandedPaddedSegmentation(segmentation, **expanded_padded_markup_kwargs)
+
+            if task == 'auto':
+                self.values_to_return.append('segmentation')
+
+        if task != 'auto':
+            self.values_to_return += task.split(',')
+
+            if 'class_3d' in self.values_to_return:
+                if self.class_label_3d is None:
+                    raise ValueError('To return class_3d we need class_labels_3d passed!')
+
+            if 'segmentation' in self.values_to_return:
+                if self.segmentation is None:
+                    raise ValueError('To return segmentation we need segmentation passed!')
+
+            if 'bbox' in self.values_to_return:
+                if self.bounding_box is not None:
+                    pass
+                elif self.segmentation is not None:
+                    self.bounding_box = ConvertableBoundingBoxes.from_segmentation(self.segmentation.data) #TODO: probably neede workaround for padded data
+                else:
+                    raise ValueError('To return bbox we need either bbox or segmentation!')
+
+            if 'class_2d' in self.values_to_return:
+                if self.class_label_2d is not None:
+                    pass
+                elif self.bounding_box is not None:
+                    self.class_label_2d = self._convert_bounding_box_to_classes(self.bounding_box.bboxes) #TODO: add here max_class
+                elif self.segmentation is not None:
+                    self.class_label_2d = self._convert_segmentation_to_classes(self.segmentation) #TODO: add here max_class
+                else:
+                    raise ValueError('To return class_2d we need either class_2d, bounding_box or segmentation!')
+
+    def _convert_bounding_box_to_classes(self, bounding_boxes, max_class=None):
+        if self.volume.mode_3d:
+            axes_to_scan = [0, 1, 2]
+        else:
+            axes_to_scan = [0]
+
+        if max_class is None:
+            max_class = np.unique([i[1] for i in bounding_boxes]).max()
+
+        classes = np.zeros((len(self.volume), max_class))
+
+        for box, lbl in bounding_boxes:
+            shift = 0
+            for ax in axes_to_scan:
+                classes[box[ax][0]+shift:box[ax][1]+shift, lbl-1] = 1
+                shift += self.volume.shapes[ax]
+
+        return classes
+
+    def _convert_segmentation_to_classes(self, segmentation, max_class=None):
+        if max_class is None:
+            max_class = np.unique(segmentation.data).max()
+
+        classes = np.zeros((len(self.volume), max_class))
+
+        for i in range(len(segmentation)):
+            for lbl in np.unique(segmentation[i])[1:]:
+                classes[i, lbl-1] = 1
+
+        return classes
+
+    def __len__(self):
+        return len(self.volume)
+
+    def _get_augmentation(self, augmentation, image, bbox, mask):
+        dict_input = {'image': image}
+
+        if bbox is not None:
+            dict_input['bboxes'], dict_input['bbox_labels'] = zip(*bbox)
+        else:
+            dict_input['bboxes'] = []
+            dict_input['bbox_labels'] = []
+        if mask is not None:
+            dict_input['mask'] = mask
+        augmented = augmentation(**dict_input)
+
+        if bbox is not None:
+            bbox = zip(augmented['bboxes'], augmented['bbox_labels'])
+        if mask is not None:
+            mask = augmented['mask']
+        image = augmented['image']
+
+        return image, bbox, mask
+
+    def __getitem__(self, id):
+        img = self.volume[id]
+        lbl_2d = None if self.class_label_2d is None else self.class_label_2d[id]
+        lbl_3d = self.class_label_3d
+        bbox = self.bounding_box[id] if self.bounding_box is not None else None
+        segm = self.segmentation[id] if self.segmentation is not None else None
+
+
+        if self.cropper is not None:
+            if isinstance(self.cropper.transforms[0], CropNonEmptyMaskIfExists):
+                crop_mask = np.zeros_like(img)
+                if segm is not None:
+                    crop_mask = deepcopy(segm)
+                if bbox is not None:
+                    for bb, i in bbox:
+                        crop_mask[bb[1]:bb[3], bb[0]:bb[2]] = i
+                temp_mask = np.stack([segm, crop_mask], -1) #TODO: will not work for multichannel masks now
+
+                img, bbox, temp_mask = self._get_augmentation(self.cropper, img, bbox, temp_mask)
+                segm = temp_mask[..., 0]
+
+            elif isinstance(self.cropper.transforms[0], RandomCrop):
+                img, bbox, segm = self._get_augmentation(self.cropper, img, bbox, segm)
+
+            else:
+                raise ValueError(f'Unknown type of cropper! Got {type(self.cropper)}.')
+
+        if self.augmentations is not None:
+            img, bbox, segm = self._get_augmentation(self.augmentations, img, bbox, segm)
+
+        values_dict = {'class_3d': lbl_3d, 'class_2d': lbl_2d, 'bbox': bbox, 'segmentation': segm}
+        return [img] + [values_dict[val] for val in self.values_to_return]
