@@ -1,0 +1,6 @@
+torch
+medpy
+scikit-image
+albumentations
+tifffile
+numpy
