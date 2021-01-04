@@ -397,10 +397,10 @@ class VolumeSlicingDataset(Dataset):
         if self.augmentations is not None:
             img, bbox, segm = self._get_augmentation(self.augmentations, img, bbox, segm)
 
-        if img.ndim == 3:
-            img = img[:, None, ...]
-        if (segm is not None) and (segm.ndim == 3):
-            segm = segm[:, None, ...]
+        if img.ndim == 2:
+            img = img[None, ...]
+        if (segm is not None) and (segm.ndim == 2):
+            segm = segm[None, ...]
 
         values_dict = {'class_3d': lbl_3d, 'class_2d': lbl_2d, 'bbox': bbox, 'segmentation': segm}
         return [img] + [values_dict[val] for val in self.values_to_return]
