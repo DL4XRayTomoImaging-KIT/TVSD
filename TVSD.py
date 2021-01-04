@@ -39,7 +39,10 @@ class ExpandedPaddedSegmentation:
     """
     def __init__(self, data, original_shape=None, boundaries=None, mode_3d=False):
         if isinstance(data, str):
-            data = internal_medload(data)
+            if data.endswith('.tif') or data.endswith('.tiff'):
+                data = tifffile.imread(data)
+            else:
+                data = internal_medload(data)
 
         if original_shape is None:
             self.is_expanded = False
