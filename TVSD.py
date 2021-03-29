@@ -25,7 +25,20 @@ def convert_id_to_3d(id, shapes):
 
     return internal_ax, internal_id
 
-internal_medload = lambda addr: np.swapaxes(medload(addr)[0], 0, -1)
+def get_new_sampling_probabilities(is_positive, negative_probability=0.1, normed=False):
+    ppo = is_positive.mean()
+    ppn = 1 - negative_probability
+
+    sampling_probabilities = np.zeros(is_positive.shape)
+    sampling_probabilities[is_positive == 0] = (1 - ppn) / (1 - ppo)
+    sampling_probabilities[is_positive == 1] = ppn / ppo
+
+    if normed:
+        sampling_probabilities = sampling_probabilities / sampling_probabilities.sum()
+
+    return sampling_probabilities
+
+internal_medload = lambda addr: medload(addr)[0]
 
 class ExpandedPaddedSegmentation:
     """
@@ -65,13 +78,25 @@ class ExpandedPaddedSegmentation:
             shapes_original = original_shape if boundaries is None else map(lambda p: p[1]-p[0], boundaries)
             self.data = skimage.transform.resize(data, shapes_original, order=0, preserve_range=True)
 
+        self.mode_3d = mode_3d
         self.len = sum(self.original_shape) if mode_3d else self.original_shape[0]
 
     def __len__(self):
         return self.len
 
+    def _contains_markup(self):
+        is_marked = []
+        axes_to_search = [0, 1, 2] if self.mode_3d else [0]
+        for ax in axes_to_search:
+            local_marked = np.zeros(self.original_shape[ax])
+            local_marked[self.boundaries[ax][0]: self.boundaries[ax][1]] = 1
+            is_marked.append(local_marked)
+
+        return np.concatenate(is_marked)
+
+
     def _is_empty(self, id, axis=None):
-        if axies is None:
+        if axis is None:
             axis, id = convert_id_to_3d(id, self.original_shape)
         if (id < self.braces[axis][0]) or (id >= self.braces[axis][1]):
             return True
@@ -87,11 +112,17 @@ class ExpandedPaddedSegmentation:
                 return new_image
 
             new_patch_position = tuple([slice(*s) for i,s in enumerate(self.boundaries) if i!= axis])
-            markup_patch = self.data.take(id - self.boundaries[axis][0], axis)
+            if axis == 0:
+                markup_patch = self.data[id - self.boundaries[axis][0]]
+            else:
+                markup_patch = self.data.take(id - self.boundaries[axis][0], axis)
 
             new_image[new_patch_position] = markup_patch
         else:
-            new_image = self.data.take(id, axis)
+            if axis == 0:
+                new_image = self.data[id]
+            else:
+                new_image = self.data.take(id, axis)
 
         return new_image
 
@@ -194,7 +225,10 @@ class OneVolume:
         internal_ax, internal_id = convert_id_to_3d(id, self.shapes)
 
         img = tifffile.memmap(self.file_addr) if self.is_memmapped else self.image
-        slc = img.take(internal_id, internal_ax)
+        if internal_ax == 0:
+            slc = img[internal_id] # this acts way faster for large arrays
+        else:
+            slc = img.take(internal_id, internal_ax)
 
         if self.is_memmapped and (self.pixel_transform is not None):
             slc = self.pixel_transform(slc)
