@@ -2,7 +2,7 @@ from torch.utils.data import Dataset
 import tifffile
 from medpy.io import load as medload
 import skimage.transform
-from albumentations.augmentations.transforms import CropNonEmptyMaskIfExists, RandomCrop
+from albumentations.augmentations.transforms import CropNonEmptyMaskIfExists, RandomCrop, PadIfNeeded
 from albumentations import Compose as AlbuCompose
 from albumentations import BboxParams
 import numpy as np
@@ -242,9 +242,9 @@ class VolumeSlicingDataset(Dataset):
 
         if crop_size is not None:
             if localised_crop:
-                self.cropper = AlbuCompose([CropNonEmptyMaskIfExists(*crop_size, always_apply=True)], bbox_params=BboxParams('pascal_voc', label_fields=['bbox_labels']))
+                self.cropper = AlbuCompose([PadIfNeeded(*crop_size, always_apply=True), CropNonEmptyMaskIfExists(*crop_size, always_apply=True)], bbox_params=BboxParams('pascal_voc', label_fields=['bbox_labels']))
             else:
-                self.cropper = AlbuCompose([RandomCrop(*crop_size, always_apply=True)], bbox_params=BboxParams('pascal_voc', label_fields=['bbox_labels']))
+                self.cropper = AlbuCompose([PadIfNeeded(*crop_size, always_apply=True), RandomCrop(*crop_size, always_apply=True)], bbox_params=BboxParams('pascal_voc', label_fields=['bbox_labels']))
         else:
             self.cropper = None
 
@@ -376,7 +376,7 @@ class VolumeSlicingDataset(Dataset):
 
 
         if self.cropper is not None:
-            if isinstance(self.cropper.transforms[0], CropNonEmptyMaskIfExists):
+            if isinstance(self.cropper.transforms[1], CropNonEmptyMaskIfExists):
                 crop_mask = np.zeros_like(img)
                 if segm is not None:
                     crop_mask = deepcopy(segm)
@@ -388,7 +388,7 @@ class VolumeSlicingDataset(Dataset):
                 img, bbox, temp_mask = self._get_augmentation(self.cropper, img, bbox, temp_mask)
                 segm = temp_mask[..., 0]
 
-            elif isinstance(self.cropper.transforms[0], RandomCrop):
+            elif isinstance(self.cropper.transforms[1], RandomCrop):
                 img, bbox, segm = self._get_augmentation(self.cropper, img, bbox, segm)
 
             else:
