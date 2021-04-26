@@ -235,6 +235,26 @@ class OneVolume:
 
         return slc
 
+def get_mrnn_by_mask(mask):
+    zone = find_connected_regions(mask)
+    boxes, labels, masks = [], [], []
+    for i, s in zip(*np.unique(zone, return_counts=True)):
+        c = mask[zone==i][0]
+        if c == 0:
+            continue # skipping background
+        if s <= 10:
+            continue # skipping noisy zones
+        box_y, box_x = np.where(zone == i) # I guess...
+        box = [box_x.min(), box_y.min(), box_x.max()+1, box_y.max()+1]
+        boxes.append(box)
+        
+        labels.append(c)
+        
+        masks.append((zone==i).astype(np.uint8))
+    
+    return {'boxes': np.array(boxes).astype(np.float32), 
+            'labels': np.array(labels).astype(np.int64), 
+            'masks': np.array(masks)}
 
 class VolumeSlicingDataset(Dataset):
     """
@@ -347,6 +367,10 @@ class VolumeSlicingDataset(Dataset):
                 else:
                     raise ValueError('To return class_2d we need either class_2d, bounding_box or segmentation!')
 
+            if 'mask_rcnn' in self.values_to_return:
+                if self.segmentation is None:
+                    raise ValueError('To return MaskRCNN labels we need segmentation passed!')
+
     def _convert_bounding_box_to_classes(self, bounding_boxes, max_class=None):
         if self.volume.mode_3d:
             axes_to_scan = [0, 1, 2]
@@ -436,5 +460,10 @@ class VolumeSlicingDataset(Dataset):
         if (segm is not None) and (segm.ndim == 2):
             segm = segm[None, ...]
 
+
         values_dict = {'class_3d': lbl_3d, 'class_2d': lbl_2d, 'bbox': bbox, 'segmentation': segm}
+        if 'mask_rcnn' in self.values_to_return:
+            # nothing else will be returned. Pots zochvatchen!!1
+            return (img, get_mrnn_by_mask(segm[0]), segm) # last one for measuring IoU
+
         return [img] + [values_dict[val] for val in self.values_to_return]
