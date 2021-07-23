@@ -8,6 +8,7 @@ from albumentations import BboxParams
 import numpy as np
 from copy import deepcopy
 from skimage.measure import label as find_connected_regions
+from collections import OrderedDict
 
 def convert_id_to_3d(id, shapes):
     """
@@ -280,7 +281,8 @@ class VolumeSlicingDataset(Dataset):
                  augmentations=None,
                  crop_size=None, localised_crop=False,
                  class_label_3d=None, class_label_2d=None, bounding_box=None,
-                 segmentation=None, expanded_padded_markup_kwargs=None, task='auto'):
+                 segmentation=None, expanded_padded_markup_kwargs=None, task='auto',
+                 additional_slices_aside=0, step_slices_aside=1):
 
         if isinstance(volume, OneVolume):
             self.volume = volume
@@ -303,6 +305,13 @@ class VolumeSlicingDataset(Dataset):
             self.cropper = None
 
         self.augmentations = augmentations
+
+        self.asa = additional_slices_aside
+        self.ssa = step_slices_aside
+
+        if self.asa > 0:
+            self.cropper.add_targets({f'image{i}':'image' for i in range(self.asa*2)})
+            self.augmentations.add_targets({f'image{i}':'image' for i in range(self.asa*2)})
 
         self.class_label_2d = None
         self.class_label_3d = None
@@ -405,6 +414,17 @@ class VolumeSlicingDataset(Dataset):
     def __len__(self):
         return len(self.volume)
 
+    def _augment_parallel(self, aug, image, **other_targets):
+        image_as_dict = OrderedDict()
+        keys = ['image'] + [f'image{i}' for i in range(len(image)-1)]
+        for k,v in zip(keys, image):
+            image_as_dict[k] = v
+        
+        augmented = aug(**image_as_dict, **other_targets)
+        augmented_image = np.stack([augmented.pop(i) for i in image_as_dict.keys()])
+        augmented['image'] = augmented_image
+        return augmented
+
     def _get_augmentation(self, augmentation, image, bbox, mask):
         dict_input = {'image': image}
 
@@ -415,7 +435,11 @@ class VolumeSlicingDataset(Dataset):
             dict_input['bbox_labels'] = []
         if mask is not None:
             dict_input['mask'] = mask
-        augmented = augmentation(**dict_input)
+        
+        if self.asa > 0:
+            augmented = self._augment_parallel(augmentation, **dict_input)
+        else:
+            augmented = augmentation(**dict_input)
 
         if bbox is not None:
             bbox = zip(augmented['bboxes'], augmented['bbox_labels'])
@@ -425,8 +449,16 @@ class VolumeSlicingDataset(Dataset):
 
         return image, bbox, mask
 
+    def _get_atrous_slices(self, id):
+        slices = np.array(list(range(id-self.asa*self.ssa, id+self.asa*self.ssa+1, self.ssa)))
+        slices = np.clip(slices, 0, len(self.volume)-1)
+        return np.stack([self.volume[i] for i in slices])
+
     def __getitem__(self, id):
-        img = self.volume[id]
+        if self.asa > 0:
+             img = self._get_atrous_slices(id)
+        else:
+            img = self.volume[id]
         lbl_2d = None if self.class_label_2d is None else self.class_label_2d[id]
         lbl_3d = self.class_label_3d
         bbox = self.bounding_box[id] if self.bounding_box is not None else None
