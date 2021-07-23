@@ -99,7 +99,7 @@ class ExpandedPaddedSegmentation:
     def _is_empty(self, id, axis=None):
         if axis is None:
             axis, id = convert_id_to_3d(id, self.original_shape)
-        if (id < self.braces[axis][0]) or (id >= self.braces[axis][1]):
+        if (id < self.boundaries[axis][0]) or (id >= self.boundaries[axis][1]):
             return True
         else:
             return False
