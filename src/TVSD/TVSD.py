@@ -10,6 +10,8 @@ from copy import deepcopy
 from skimage.measure import label as find_connected_regions
 from collections import OrderedDict
 
+from univread import read as imread
+
 def convert_id_to_3d(id, shapes):
     """
     Converts linear id to the slice taken across one of the axes.
@@ -53,10 +55,7 @@ class ExpandedPaddedSegmentation:
     """
     def __init__(self, data, original_shape=None, boundaries=None, mode_3d=False):
         if isinstance(data, str):
-            if data.endswith('.tif') or data.endswith('.tiff'):
-                data = tifffile.imread(data)
-            else:
-                data = internal_medload(data)
+            data = imread(data)
 
         if original_shape is None:
             self.is_expanded = False
@@ -189,17 +188,17 @@ class OneVolume:
         use_ram: bool if set to false while using tiff format will not load whole volume to ram, will directly read slices from drive.
         pixel_transform: callable for pixel-wise transformation, e.g. to cast to another type or scale-shift values
     """
-    def __init__(self, data, mode_3d=False, use_ram=False, pixel_transform=None):
+    def __init__(self, data, mode_3d=False, use_ram=True, pixel_transform=None):
         self.is_memmapped = False
         if isinstance(data, str):
+            if use_ram:
+                self.image = imread(data)
+            else:
             if data.endswith('.tif') or data.endswith('.tiff'):
-                if not use_ram:
                     self.file_addr = data
                     self.is_memmapped = True
                     self.shapes = tifffile.memmap(self.file_addr).shape
                 else:
-                    self.image = tifffile.imread(data)
-            else:
                 self.image = internal_medload(data)
         else:
             self.image = data

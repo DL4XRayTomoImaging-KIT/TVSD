@@ -2,5 +2,5 @@ torch
 medpy
 scikit-image
 albumentations
-tifffile
+git+https://github.com/DL4XRayTomoImaging-KIT/UnivRead3D
 numpy
