@@ -54,6 +54,8 @@ class ExpandedPaddedSegmentation:
         mode_3d: bool indicator of supporting linear slicing from axes other then 0.
     """
     def __init__(self, data, original_shape=None, boundaries=None, mode_3d=False):
+        PendingDeprecationWarning('Using ExpandedPaddedSegmentation will be deprecated, as this class doesn"t look usable anymore. Please, write maintainers if you disagree.')
+
         if isinstance(data, str):
             data = imread(data)
 
@@ -130,6 +132,45 @@ class ExpandedPaddedSegmentation:
         internal_ax, internal_id = convert_id_to_3d(id, self.original_shape)
         return self._expand_markup(internal_ax, internal_id)
 
+class SlicedSegmentation:
+    def __init__(self, data, mode_3d=False):
+        self.mode_3d = mode_3d
+
+        if isinstance(data, str):
+            self.data = imread(data)
+        else:
+            self.data = data
+        
+        self.original_shape = data.shape #left for compatibility with ExpandedPaddedSegmentation should probably be deprecated later
+
+        self.len = sum(self.original_shape) if mode_3d else self.original_shape[0]
+    
+    def __len__(self):
+        return self.len
+    
+    def _contains_markup(self):
+        is_marked = []
+        axes_to_search = [0, 1, 2] if self.mode_3d else [0]
+        for ax in axes_to_search:
+            all_axes = [0, 1, 2]
+            all_axes.pop(ax)
+            is_marked.append(self.data.sum(tuple(all_axes)) > 0)
+
+        return np.concatenate(is_marked)
+
+    def _is_empty(self, id, axis=None):
+        DeprecationWarning('method _is_empty() is deprecated and will be removed in future releases. Please, use _contains_markup()')
+        if axis is None:
+            id, axis = convert_id_to_3d(id, self.data.shape)
+        return self.data.take(id, axis).sum() > 0
+
+    def __getitem__(self, id):
+        internal_ax, internal_id = convert_id_to_3d(id, self.original_shape)
+
+        if internal_ax == 0:
+            return self.data[internal_id]
+        else:
+            return self.data.take(internal_id, internal_ax)
 
 class ConvertableBoundingBoxes:
     def __init__(self, bboxes, shapes, coord_format='int'):
@@ -194,12 +235,12 @@ class OneVolume:
             if use_ram:
                 self.image = imread(data)
             else:
-            if data.endswith('.tif') or data.endswith('.tiff'):
+                if data.endswith('.tif') or data.endswith('.tiff'):
                     self.file_addr = data
                     self.is_memmapped = True
                     self.shapes = tifffile.memmap(self.file_addr).shape
                 else:
-                self.image = internal_medload(data)
+                    self.image = internal_medload(data)
         else:
             self.image = data
 
@@ -334,14 +375,17 @@ class VolumeSlicingDataset(Dataset):
                 self.values_to_return.append('bbox')
 
         if segmentation is not None:
-            if isinstance(segmentation, ExpandedPaddedSegmentation):
+            if isinstance(segmentation, (ExpandedPaddedSegmentation, SlicedSegmentation)):
                 self.segmentation = segmentation
             else:
                 if expanded_padded_markup_kwargs is None:
                     expanded_padded_markup_kwargs = {}
                 if mode_3d:
                     expanded_padded_markup_kwargs['mode_3d'] = True
-                self.segmentation = ExpandedPaddedSegmentation(segmentation, **expanded_padded_markup_kwargs)
+                if ('original_shape' in expanded_padded_markup_kwargs) and (expanded_padded_markup_kwargs['original_shape'] is not None):
+                    self.segmentation = ExpandedPaddedSegmentation(segmentation, **expanded_padded_markup_kwargs)
+                else:
+                    self.segmentation = SlicedSegmentation(segmentation, **expanded_padded_markup_kwargs)
 
             if task == 'auto':
                 self.values_to_return.append('segmentation')
