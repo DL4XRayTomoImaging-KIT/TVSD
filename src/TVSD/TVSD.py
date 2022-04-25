@@ -1,3 +1,5 @@
+from statistics import mode
+from cProfile import label
 from torch.utils.data import Dataset
 import tifffile
 from medpy.io import load as medload
@@ -133,17 +135,23 @@ class ExpandedPaddedSegmentation:
         return self._expand_markup(internal_ax, internal_id)
 
 class SlicedSegmentation:
-    def __init__(self, data, mode_3d=False):
+    def __init__(self, data, mode_3d=False, use_ram=True, label_converter=None):
         self.mode_3d = mode_3d
+        self.use_ram = use_ram 
+        self.label_converter = label_converter
 
         if isinstance(data, str):
-            self.data = imread(data)
+            self.data = imread(data, lazy=(not self.use_ram))
         else:
             self.data = data
-        
-        self.original_shape = data.shape #left for compatibility with ExpandedPaddedSegmentation should probably be deprecated later
+        if self.label_converter is not None:
+            if self.use_ram or not isinstance(data, str):
+                self.data = np.vectorize(self.label_converter.get)(self.data)
+                self.label_converter = None # already converted, removing to avoid dynamically converting it
 
-        self.len = sum(self.original_shape) if mode_3d else self.original_shape[0]
+        self.original_shape = self.data.shape #left for compatibility with ExpandedPaddedSegmentation should probably be deprecated later
+
+        self.len = sum(self.data.shape) if mode_3d else self.data.shape[0]
     
     def __len__(self):
         return self.len
@@ -168,9 +176,14 @@ class SlicedSegmentation:
         internal_ax, internal_id = convert_id_to_3d(id, self.original_shape)
 
         if internal_ax == 0:
-            return self.data[internal_id]
+            slc = self.data[internal_id]
         else:
-            return self.data.take(internal_id, internal_ax)
+            slc = self.data.take(internal_id, internal_ax)
+        
+        if self.label_converter is not None:
+            slc = np.vectorize(self.label_converter.get)(slc)
+        
+        return slc
 
 class ConvertableBoundingBoxes:
     def __init__(self, bboxes, shapes, coord_format='int'):
@@ -304,7 +317,7 @@ class VolumeSlicingDataset(Dataset):
 
     Args:
         volume: [np.array, str, OneVolume] is the image itself. If array or string is passed will be converted to the OneVolume with usage of one_volume_kwargs param.
-        one_volume_kwargs: [dict] is the parameters to convert address or np.array to the OneVolume
+        volume_kwargs: [dict] is the parameters to convert address or np.array to the OneVolume
         mode_3d: [bool] if set to True will override this parameter for both volume and segmentation. Will allow slicing along all different axes, not only 0 axis will be sliced.
         augmentations: [albumentations.Compose] -- set of albumentation augmentations, will be applied for all available targets.
         crop_size: [int, tuple(int)] size of the image crop to be done from each slice. If one int passed will be square crop.
@@ -313,25 +326,35 @@ class VolumeSlicingDataset(Dataset):
         class_label_2d: [np.array, list] classes for each possible slice (either of length volume.shape[0] or sum(volume.shape) if mode_3d is True), to be returned for slices specifically.
         bounding_box: list(tuple(list(tuple), int)) -- 3D bounding boxes list. Each bounding box in list should be pair of list of coordinates of start and end across each axis and class.
         segmentation:[np.array, str, ExpandedPaddedSegmentation] -- either address, volume or special class of segmentation. If address or volume passed, will be converted to the ExpandedPaddedSegmentation.
-        expanded_padded_markup_kwargs: [dict] -- paramters to convert volume or address of segmentation masks to the ExpandedPaddedMarkup.
+        segmentation_kwargs: [dict] -- paramters to convert volume or address of segmentation masks to the ExpandedPaddedMarkup.
         task: [str] -- either 'auto', which means everything passed to the class will be returned, or possible tasks from list of 'bbox,segmentation,class_2d,class_3d' separated by comma.
             Some conversions are possible. if bounding boxes or segmentation masks are provided, labels for 2d classification would be generated. If segmentation is provided, bounding_boxes will be generated.
     """
-    def __init__(self, volume, one_volume_kwargs=None, mode_3d=False,
+    def __init__(self, volume, volume_kwargs=None, 
+                 mode_3d=False, use_ram=True,
                  augmentations=None,
                  crop_size=None, localised_crop=False,
                  class_label_3d=None, class_label_2d=None, bounding_box=None,
-                 segmentation=None, expanded_padded_markup_kwargs=None, task='auto',
+                 segmentation=None, segmentation_kwargs=None, 
+                 task='auto',
                  additional_slices_aside=0, step_slices_aside=1):
+
+        volume_kwargs = volume_kwargs or {}
+        segmentation_kwargs = segmentation_kwargs or {}
+
+        default_parameters = {'mode_3d': mode_3d, 'use_ram': use_ram}
+        
+        volume_kwargs = default_parameters | volume_kwargs
+        segmentation_kwargs = default_parameters | segmentation_kwargs
 
         if isinstance(volume, OneVolume):
             self.volume = volume
         else:
-            if one_volume_kwargs is None:
-                one_volume_kwargs = {}
+            if volume_kwargs is None:
+                volume_kwargs = {}
             if mode_3d:
-                one_volume_kwargs['mode_3d'] = True
-            self.volume = OneVolume(volume, **one_volume_kwargs)
+                volume_kwargs['mode_3d'] = True
+            self.volume = OneVolume(volume, **volume_kwargs)
 
         if isinstance(crop_size, int):
             crop_size = (crop_size, crop_size)
@@ -378,14 +401,14 @@ class VolumeSlicingDataset(Dataset):
             if isinstance(segmentation, (ExpandedPaddedSegmentation, SlicedSegmentation)):
                 self.segmentation = segmentation
             else:
-                if expanded_padded_markup_kwargs is None:
-                    expanded_padded_markup_kwargs = {}
+                if segmentation_kwargs is None:
+                    segmentation_kwargs = {}
                 if mode_3d:
-                    expanded_padded_markup_kwargs['mode_3d'] = True
-                if ('original_shape' in expanded_padded_markup_kwargs) and (expanded_padded_markup_kwargs['original_shape'] is not None):
-                    self.segmentation = ExpandedPaddedSegmentation(segmentation, **expanded_padded_markup_kwargs)
+                    segmentation_kwargs['mode_3d'] = True
+                if ('original_shape' in segmentation_kwargs) and (segmentation_kwargs['original_shape'] is not None):
+                    self.segmentation = ExpandedPaddedSegmentation(segmentation, **segmentation_kwargs)
                 else:
-                    self.segmentation = SlicedSegmentation(segmentation, **expanded_padded_markup_kwargs)
+                    self.segmentation = SlicedSegmentation(segmentation, **segmentation_kwargs)
 
             if task == 'auto':
                 self.values_to_return.append('segmentation')
