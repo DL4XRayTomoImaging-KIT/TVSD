@@ -1,7 +1,6 @@
 from statistics import mode
 from cProfile import label
 from torch.utils.data import Dataset
-import tifffile
 from medpy.io import load as medload
 import skimage.transform
 from albumentations.augmentations.transforms import CropNonEmptyMaskIfExists, RandomCrop, PadIfNeeded
@@ -251,7 +250,7 @@ class OneVolume:
                 if data.endswith('.tif') or data.endswith('.tiff'):
                     self.file_addr = data
                     self.is_memmapped = True
-                    self.shapes = tifffile.memmap(self.file_addr).shape
+                    self.shapes = imread(self.file_addr, lazy=True).shape
                 else:
                     self.image = internal_medload(data)
         else:
@@ -278,7 +277,7 @@ class OneVolume:
     def __getitem__(self, id):
         internal_ax, internal_id = convert_id_to_3d(id, self.shapes)
 
-        img = tifffile.memmap(self.file_addr) if self.is_memmapped else self.image
+        img = imread(self.file_addr, lazy=True) if self.is_memmapped else self.image
         if internal_ax == 0:
             slc = img[internal_id] # this acts way faster for large arrays
         else:
