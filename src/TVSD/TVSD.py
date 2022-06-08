@@ -371,6 +371,10 @@ class VolumeSlicingDataset(Dataset):
         self.asa = additional_slices_aside
         self.ssa = step_slices_aside
 
+        self.successful_readings = 0
+        self.unsuccessful_readings = 0
+        self.consequent_errors = 0
+
         if self.asa > 0:
             self.cropper.add_targets({f'image{i}':'image' for i in range(self.asa*2)})
             self.augmentations.add_targets({f'image{i}':'image' for i in range(self.asa*2)})
@@ -520,14 +524,24 @@ class VolumeSlicingDataset(Dataset):
         return np.stack([self.volume[i] for i in slices])
 
     def __getitem__(self, id):
-        if self.asa > 0:
-             img = self._get_atrous_slices(id)
-        else:
-            img = self.volume[id]
-        lbl_2d = None if self.class_label_2d is None else self.class_label_2d[id]
-        lbl_3d = self.class_label_3d
-        bbox = self.bounding_box[id] if self.bounding_box is not None else None
-        segm = self.segmentation[id] if self.segmentation is not None else None
+        try:
+            if self.asa > 0:
+                img = self._get_atrous_slices(id)
+            else:
+                img = self.volume[id]
+            lbl_2d = None if self.class_label_2d is None else self.class_label_2d[id]
+            lbl_3d = self.class_label_3d
+            bbox = self.bounding_box[id] if self.bounding_box is not None else None
+            segm = self.segmentation[id] if self.segmentation is not None else None
+            self.successful_readings += 1
+            self.consequent_errors = 0
+        except Exception as e:
+            self.unsuccessful_readings += 1
+            self.consequent_errors += 1
+            if (self.unsuccessful_readings / (self.successful_readings + 1)) > 0.02:
+                raise Exception(f'Too much reading errors: {self.unsuccessful_readings} successful while {self.successful_readings} unsuccessful.')
+            if self.consequent_errors > 20:
+                raise Exception(f'Too much consequent reading errors: {self.consequent_errors} in a row without success.')
 
 
         if self.cropper is not None:
