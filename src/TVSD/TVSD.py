@@ -538,8 +538,10 @@ class VolumeSlicingDataset(Dataset):
         except Exception as e:
             self.unsuccessful_readings += 1
             self.consequent_errors += 1
-            if (self.unsuccessful_readings / (self.successful_readings + 1)) > 0.02:
-                raise Exception(f'Too much reading errors: {self.unsuccessful_readings} successful while {self.successful_readings} unsuccessful.')
+            total_readings = self.successful_readings + self.unsuccessful_readings
+            failure_ratio = self.unsuccessful_readings / (self.successful_readings + 1)
+            if  (total_readings > 50) and (failure_ratio > 0.02):
+                raise Exception(f'Too much reading errors: {self.successful_readings} successful while {self.unsuccessful_readings} unsuccessful.')
             if self.consequent_errors > 20:
                 raise Exception(f'Too much consequent reading errors: {self.consequent_errors} in a row without success.')
 
