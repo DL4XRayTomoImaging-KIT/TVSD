@@ -529,9 +529,6 @@ class VolumeSlicingDataset(Dataset):
                 img = self._get_atrous_slices(id)
             else:
                 img = self.volume[id]
-            lbl_2d = None if self.class_label_2d is None else self.class_label_2d[id]
-            lbl_3d = self.class_label_3d
-            bbox = self.bounding_box[id] if self.bounding_box is not None else None
             segm = self.segmentation[id] if self.segmentation is not None else None
             self.successful_readings += 1
             self.consequent_errors = 0
@@ -544,6 +541,20 @@ class VolumeSlicingDataset(Dataset):
                 raise Exception(f'Too much reading errors: {self.successful_readings} successful while {self.unsuccessful_readings} unsuccessful.')
             if self.consequent_errors > 20:
                 raise Exception(f'Too much consequent reading errors: {self.consequent_errors} in a row without success.')
+            
+            if self.asa > 0:
+                raise NotImplementedError('Fake sampling is not implemented for atrocious slices yet')
+            else:
+                img = np.random.randint(0, 255, self.volume.shapes[1:]).astype(np.uint8)
+            segm = np.zeros_like(img)
+            self.successful_readings += 1
+            self.consequent_errors = 0
+        
+        # I exepect following to be in RAM anyways.
+        lbl_2d = None if self.class_label_2d is None else self.class_label_2d[id]
+        lbl_3d = self.class_label_3d
+        bbox = self.bounding_box[id] if self.bounding_box is not None else None
+
 
 
         if self.cropper is not None:
