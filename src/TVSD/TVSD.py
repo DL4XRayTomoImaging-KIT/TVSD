@@ -524,31 +524,23 @@ class VolumeSlicingDataset(Dataset):
         return np.stack([self.volume[i] for i in slices])
 
     def __getitem__(self, id):
-        try:
+        def get_img_and_segm():
             if self.asa > 0:
                 img = self._get_atrous_slices(id)
             else:
                 img = self.volume[id]
             segm = self.segmentation[id] if self.segmentation is not None else None
-            self.successful_readings += 1
-            self.consequent_errors = 0
-        except Exception as e:
-            self.unsuccessful_readings += 1
-            self.consequent_errors += 1
-            total_readings = self.successful_readings + self.unsuccessful_readings
-            failure_ratio = self.unsuccessful_readings / (self.successful_readings + 1)
-            if  (total_readings > 50) and (failure_ratio > 0.02):
-                raise Exception(f'Too much reading errors: {self.successful_readings} successful while {self.unsuccessful_readings} unsuccessful.')
-            if self.consequent_errors > 20:
-                raise Exception(f'Too much consequent reading errors: {self.consequent_errors} in a row without success.')
-            
-            if self.asa > 0:
-                raise NotImplementedError('Fake sampling is not implemented for atrocious slices yet')
-            else:
-                img = np.random.randint(0, 255, self.volume.shapes[1:]).astype(np.uint8)
-            segm = np.zeros_like(img)
-            self.successful_readings += 1
-            self.consequent_errors = 0
+            return img, segm
+
+        max_attempts = 10    
+        for attempt in range(max_attempts):
+            try:
+                img, segm = get_img_and_segm()
+                break
+            except Exception:
+                pass
+        else:
+            raise Exception(f'{max_attempts} consequent reading errors in a row without success.')        
         
         # I exepect following to be in RAM anyways.
         lbl_2d = None if self.class_label_2d is None else self.class_label_2d[id]
