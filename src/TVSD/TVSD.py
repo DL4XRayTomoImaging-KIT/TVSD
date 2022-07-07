@@ -42,7 +42,6 @@ def get_new_sampling_probabilities(is_positive, negative_probability=0.1, normed
 
     return sampling_probabilities
 
-internal_medload = lambda addr: medload(addr)[0]
 
 class ExpandedPaddedSegmentation:
     """
@@ -140,7 +139,8 @@ class SlicedSegmentation:
         self.label_converter = label_converter
 
         if isinstance(data, str):
-            self.data = imread(data, lazy=(not self.use_ram))
+            self.file_addr = data
+            self.data = imread(self.file_addr, lazy=(not self.use_ram))
         else:
             self.data = data
         if self.label_converter is not None:
@@ -242,22 +242,14 @@ class OneVolume:
         pixel_transform: callable for pixel-wise transformation, e.g. to cast to another type or scale-shift values
     """
     def __init__(self, data, mode_3d=False, use_ram=True, pixel_transform=None):
-        self.is_memmapped = False
+        self.use_ram = use_ram
         if isinstance(data, str):
-            if use_ram:
-                self.image = imread(data)
-            else:
-                if data.endswith('.tif') or data.endswith('.tiff'):
-                    self.file_addr = data
-                    self.is_memmapped = True
-                    self.shapes = imread(self.file_addr, lazy=True).shape
-                else:
-                    self.image = internal_medload(data)
+            self.file_addr = data
+            self.image = imread(self.file_addr, lazy=not self.use_ram)
         else:
             self.image = data
 
-        if not self.is_memmapped:
-            self.shapes = self.image.shape
+        self.shapes = self.image.shape
 
         self.mode_3d = mode_3d
         if mode_3d:
@@ -265,7 +257,7 @@ class OneVolume:
         else:
             self.len = self.shapes[0]
 
-        if self.is_memmapped:
+        if not self.use_ram:
             self.pixel_transform = pixel_transform
         else:
             if pixel_transform is not None:
@@ -277,13 +269,12 @@ class OneVolume:
     def __getitem__(self, id):
         internal_ax, internal_id = convert_id_to_3d(id, self.shapes)
 
-        img = imread(self.file_addr, lazy=True) if self.is_memmapped else self.image
         if internal_ax == 0:
-            slc = img[internal_id] # this acts way faster for large arrays
+            slc = self.image[internal_id] # this acts way faster for large arrays
         else:
-            slc = img.take(internal_id, internal_ax)
+            slc = self.image.take(internal_id, internal_ax)
 
-        if self.is_memmapped and (self.pixel_transform is not None):
+        if not self.use_ram and (self.pixel_transform is not None):
             slc = self.pixel_transform(slc)
 
         return slc
@@ -532,7 +523,8 @@ class VolumeSlicingDataset(Dataset):
             segm = self.segmentation[id] if self.segmentation is not None else None
             return img, segm
 
-        max_attempts = 10    
+        # keep reading again if fails
+        max_attempts = 10  
         for attempt in range(max_attempts):
             try:
                 img, segm = get_img_and_segm()
