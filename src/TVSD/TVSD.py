@@ -140,7 +140,10 @@ class SlicedSegmentation:
 
         if isinstance(data, str):
             self.file_addr = data
-            self.data = imread(self.file_addr, lazy=(not self.use_ram))
+            if use_ram:
+                self.data = imread(data)
+            else:
+                self.shapes = imread(self.file_addr, lazy=True).shape
         else:
             self.data = data
         if self.label_converter is not None:
@@ -148,36 +151,44 @@ class SlicedSegmentation:
                 self.data = np.vectorize(self.label_converter.get)(self.data)
                 self.label_converter = None # already converted, removing to avoid dynamically converting it
 
-        self.original_shape = self.data.shape #left for compatibility with ExpandedPaddedSegmentation should probably be deprecated later
+        if self.use_ram:
+            self.original_shape = self.data.shape #left for compatibility with ExpandedPaddedSegmentation should probably be deprecated later
+            self.shapes = self.data.shape
 
-        self.len = sum(self.data.shape) if mode_3d else self.data.shape[0]
+        self.len = sum(self.shapes) if mode_3d else self.shapes[0]
     
     def __len__(self):
         return self.len
     
+    def _get_data(self):
+        return self.data if self.use_ram else imread(self.file_addr, lazy=True)
+    
     def _contains_markup(self):
         is_marked = []
         axes_to_search = [0, 1, 2] if self.mode_3d else [0]
+        segm = self._get_data()
         for ax in axes_to_search:
             all_axes = [0, 1, 2]
             all_axes.pop(ax)
-            is_marked.append(self.data.sum(tuple(all_axes)) > 0)
+            is_marked.append(segm.sum(tuple(all_axes)) > 0)
 
         return np.concatenate(is_marked)
 
     def _is_empty(self, id, axis=None):
         DeprecationWarning('method _is_empty() is deprecated and will be removed in future releases. Please, use _contains_markup()')
+        segm = self._get_data()
         if axis is None:
-            id, axis = convert_id_to_3d(id, self.data.shape)
-        return self.data.take(id, axis).sum() > 0
+            id, axis = convert_id_to_3d(id, self.shapes)
+        return segm.take(id, axis).sum() > 0
 
     def __getitem__(self, id):
-        internal_ax, internal_id = convert_id_to_3d(id, self.original_shape)
+        internal_ax, internal_id = convert_id_to_3d(id, self.shapes)
 
+        segm = self._get_data()
         if internal_ax == 0:
-            slc = self.data[internal_id]
+            slc = segm[internal_id]
         else:
-            slc = self.data.take(internal_id, internal_ax)
+            slc = segm.take(internal_id, internal_ax)
         
         if self.label_converter is not None:
             slc = np.vectorize(self.label_converter.get)(slc)
@@ -242,20 +253,22 @@ class OneVolume:
         pixel_transform: callable for pixel-wise transformation, e.g. to cast to another type or scale-shift values
     """
     def __init__(self, data, mode_3d=False, use_ram=True, pixel_transform=None):
+        self.mode_3d = mode_3d    
         self.use_ram = use_ram
+                
         if isinstance(data, str):
             self.file_addr = data
-            self.image = imread(self.file_addr, lazy=not self.use_ram)
+            if use_ram:
+                self.image = imread(data)
+            else:
+                self.shapes = imread(self.file_addr, lazy=True).shape
         else:
             self.image = data
 
-        self.shapes = self.image.shape
+        if self.use_ram:
+            self.shapes = self.image.shape
 
-        self.mode_3d = mode_3d
-        if mode_3d:
-            self.len = sum(self.shapes)
-        else:
-            self.len = self.shapes[0]
+        self.len = sum(self.shapes) if mode_3d else self.shapes[0]
 
         if not self.use_ram:
             self.pixel_transform = pixel_transform
@@ -265,14 +278,18 @@ class OneVolume:
 
     def __len__(self):
         return self.len
+        
+    def _get_image(self):
+        return self.image if self.use_ram else imread(self.file_addr, lazy=True)     
 
     def __getitem__(self, id):
         internal_ax, internal_id = convert_id_to_3d(id, self.shapes)
 
+        img = self._get_image()
         if internal_ax == 0:
-            slc = self.image[internal_id] # this acts way faster for large arrays
+            slc = img[internal_id] # this acts way faster for large arrays
         else:
-            slc = self.image.take(internal_id, internal_ax)
+            slc = img.take(internal_id, internal_ax)
 
         if not self.use_ram and (self.pixel_transform is not None):
             slc = self.pixel_transform(slc)
@@ -361,10 +378,6 @@ class VolumeSlicingDataset(Dataset):
 
         self.asa = additional_slices_aside
         self.ssa = step_slices_aside
-
-        self.successful_readings = 0
-        self.unsuccessful_readings = 0
-        self.consequent_errors = 0
 
         if self.asa > 0:
             self.cropper.add_targets({f'image{i}':'image' for i in range(self.asa*2)})
